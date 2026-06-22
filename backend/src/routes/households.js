@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { v4 as uuidv4 } from 'uuid';
 import pool from '../db/client.js';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const router = Router();
 
@@ -46,6 +47,9 @@ router.post('/', async (req, res) => {
 
 // Busca domicílio por ID (com cômodos)
 router.get('/:id', async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) {
+    return res.status(400).json({ error: 'ID inválido' });
+  }
   try {
     const { rows: hh } = await pool.query(
       'SELECT * FROM households WHERE id = $1',

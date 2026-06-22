@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { createHousehold, getHousehold, getLists, createList } from '../services/api';
 
 const HOUSEHOLD_KEY = 'listinha_household_id';
@@ -9,12 +9,7 @@ export default function Home({ onOpenList }) {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
-  useEffect(() => {
-    bootstrap();
-  }, []);
-
-  async function bootstrap() {
-    setLoading(true);
+  const bootstrap = useCallback(async () => {
     try {
       let id = localStorage.getItem(HOUSEHOLD_KEY);
       if (!id) {
@@ -33,7 +28,11 @@ export default function Home({ onOpenList }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  // loading inicia como true; bootstrap só precisa setá-lo para false
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { bootstrap(); }, [bootstrap]);
 
   async function handleNewList() {
     if (!household || creating) return;

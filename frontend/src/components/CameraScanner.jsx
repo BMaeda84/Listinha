@@ -37,6 +37,8 @@ export default function CameraScanner({ listId, roomId, roomName, householdId, o
   const { videoRef, isActive, status, sessionItems, startCamera, stopCamera, resetSession } =
     useCamera({ listId, roomId, roomName, householdId, onItemFound: handleItemFound });
 
+  // sessionItems.length é a contagem de itens únicos encontrados nesta sessão
+
   // ZXing para barcode — corre em paralelo com Claude Vision
   useEffect(() => {
     if (!isActive) return;
@@ -50,7 +52,7 @@ export default function CameraScanner({ listId, roomId, roomName, householdId, o
     let lastBarcode = null;
     let lastBarcodeTime = 0;
 
-    const controls = reader.decodeFromVideoElement(videoEl, async (result, err) => {
+    const controls = reader.decodeFromVideoElement(videoEl, async (result) => {
       if (!result) return;
       const code = result.getText();
       const now = Date.now();

@@ -20,9 +20,12 @@ export default function ListDetail({ listId, household, onBack }) {
     }
   }, [listId]);
 
+  // loading inicia como true; reload só precisa setá-lo para false
   useEffect(() => {
-    setLoading(true);
-    reload().finally(() => setLoading(false));
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    reload().finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [reload]);
 
   function openScanner(room) {

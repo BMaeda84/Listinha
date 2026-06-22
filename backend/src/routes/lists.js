@@ -2,10 +2,18 @@ import { Router } from 'express';
 import pool from '../db/client.js';
 
 const router = Router();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidUUID(v) {
+  return typeof v === 'string' && UUID_RE.test(v);
+}
 
 // Cria nova lista de compras
 router.post('/', async (req, res) => {
   const { household_id, name } = req.body;
+  if (!isValidUUID(household_id)) {
+    return res.status(400).json({ error: 'household_id inválido' });
+  }
   try {
     const { rows } = await pool.query(
       'INSERT INTO shopping_lists (household_id, name) VALUES ($1, $2) RETURNING *',
@@ -20,6 +28,9 @@ router.post('/', async (req, res) => {
 
 // Lista todas as listas de um domicílio
 router.get('/household/:householdId', async (req, res) => {
+  if (!isValidUUID(req.params.householdId)) {
+    return res.status(400).json({ error: 'ID inválido' });
+  }
   try {
     const { rows } = await pool.query(
       `SELECT sl.*, COUNT(li.id) AS total_items,
@@ -40,6 +51,9 @@ router.get('/household/:householdId', async (req, res) => {
 
 // Busca lista com todos os itens
 router.get('/:id', async (req, res) => {
+  if (!isValidUUID(req.params.id)) {
+    return res.status(400).json({ error: 'ID inválido' });
+  }
   try {
     const { rows: list } = await pool.query(
       'SELECT * FROM shopping_lists WHERE id = $1',
@@ -67,6 +81,9 @@ router.get('/:id', async (req, res) => {
 
 // Marca item como comprado / desmarca
 router.patch('/items/:itemId/check', async (req, res) => {
+  if (!isValidUUID(req.params.itemId)) {
+    return res.status(400).json({ error: 'ID inválido' });
+  }
   const { checked } = req.body;
   try {
     const { rows } = await pool.query(
@@ -86,6 +103,9 @@ router.patch('/items/:itemId/check', async (req, res) => {
 
 // Finaliza uma lista e registra no histórico de compras
 router.patch('/:id/complete', async (req, res) => {
+  if (!isValidUUID(req.params.id)) {
+    return res.status(400).json({ error: 'ID inválido' });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

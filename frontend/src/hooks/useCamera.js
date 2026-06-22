@@ -2,8 +2,8 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 import { detectMotion, isSharp, captureFrame } from '../utils/motionDetect';
 import { scanFrame, addScannedItem } from '../services/api';
 
-const SCAN_INTERVAL_MS = 2500;   // intervalo entre análises (quando estável)
-const STABILIZE_MS = 800;        // espera após detectar movimento
+const SCAN_INTERVAL_MS = 2500;
+const STABILIZE_MS = 800;
 
 export function useCamera({ listId, roomId, roomName, householdId, onItemFound }) {
   const videoRef = useRef(null);
@@ -11,11 +11,24 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
   const intervalRef = useRef(null);
   const stabilizeTimerRef = useRef(null);
 
+  // Refs para valores lidos dentro do setInterval (evita loop de deps)
+  const statusRef = useRef('idle');       // 'idle'|'scanning'|'moving'|'blurred'|'processing'
+  const isProcessingRef = useRef(false);
+
+  // Map<fingerprint, displayName> — não é state porque mutações internas
+  // não precisam re-renderizar; só sessionItems (para o contador de UI) precisa.
+  const registryRef = useRef(new Map());
+
+  const sceneAnchorRef = useRef(null);
+
   const [isActive, setIsActive] = useState(false);
-  const [status, setStatus] = useState('idle'); // idle | scanning | moving | blurred | processing
-  const [sessionRegistry, setSessionRegistry] = useState(new Set()); // fingerprints já vistos
-  const [sessionItems, setSessionItems] = useState([]);              // itens desta sessão
-  const [sceneAnchor, setSceneAnchor] = useState(null);
+  const [status, setStatus] = useState('idle');
+  const [sessionItems, setSessionItems] = useState([]);
+
+  function updateStatus(s) {
+    statusRef.current = s;
+    setStatus(s);
+  }
 
   const stopCamera = useCallback(() => {
     clearInterval(intervalRef.current);
@@ -24,8 +37,9 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
       videoRef.current.srcObject.getTracks().forEach(t => t.stop());
       videoRef.current.srcObject = null;
     }
+    isProcessingRef.current = false;
     setIsActive(false);
-    setStatus('idle');
+    updateStatus('idle');
   }, []);
 
   const startCamera = useCallback(async () => {
@@ -36,20 +50,22 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
       videoRef.current.srcObject = stream;
       await videoRef.current.play();
       setIsActive(true);
-      setStatus('scanning');
+      updateStatus('scanning');
     } catch (err) {
       console.error('Erro ao acessar câmera:', err);
-      setStatus('idle');
+      updateStatus('idle');
     }
   }, []);
 
-  // Loop principal de análise de frames
+  // Loop principal — roda uma única vez por sessão ativa
   useEffect(() => {
     if (!isActive) return;
 
     intervalRef.current = setInterval(async () => {
       if (!videoRef.current || videoRef.current.readyState < 2) return;
-      if (status === 'processing') return;
+
+      // Usa ref para checar status sem colocá-lo nas deps
+      if (isProcessingRef.current || statusRef.current === 'moving') return;
 
       const { canvas, base64 } = captureFrame(videoRef.current);
 
@@ -57,9 +73,9 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
       if (prevCanvasRef.current) {
         const moving = detectMotion(prevCanvasRef.current, canvas);
         if (moving) {
-          setStatus('moving');
+          updateStatus('moving');
           clearTimeout(stabilizeTimerRef.current);
-          stabilizeTimerRef.current = setTimeout(() => setStatus('scanning'), STABILIZE_MS);
+          stabilizeTimerRef.current = setTimeout(() => updateStatus('scanning'), STABILIZE_MS);
           prevCanvasRef.current = canvas;
           return;
         }
@@ -68,31 +84,34 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
 
       // 2. Detecção de desfoque
       if (!isSharp(canvas)) {
-        setStatus('blurred');
+        updateStatus('blurred');
         return;
       }
 
       // 3. Enviar para Claude Vision
-      setStatus('processing');
+      isProcessingRef.current = true;
+      updateStatus('processing');
+
       try {
+        // already_seen envia nomes de exibição legíveis, não fingerprints
+        const alreadySeen = Array.from(registryRef.current.values());
+
         const result = await scanFrame({
           image_base64: base64,
           room_name: roomName,
-          already_seen: Array.from(sessionRegistry),
-          scene_anchor: sceneAnchor,
+          already_seen: alreadySeen,
+          scene_anchor: sceneAnchorRef.current,
           household_id: householdId,
         });
 
-        // Atualiza âncora de cena na primeira análise bem-sucedida
-        if (!sceneAnchor && result.scene_description) {
-          setSceneAnchor(result.scene_description);
+        if (!sceneAnchorRef.current && result.scene_description) {
+          sceneAnchorRef.current = result.scene_description;
         }
 
-        // Processa itens novos
         for (const item of result.items || []) {
-          if (sessionRegistry.has(item.fingerprint)) continue;
+          // Dedup por fingerprint usando o Map
+          if (registryRef.current.has(item.fingerprint)) continue;
 
-          // Adiciona à lista no backend
           const { item: listItem, product } = await addScannedItem({
             list_id: listId,
             room_id: roomId,
@@ -101,27 +120,34 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
             qty: item.qty_visible || 1,
           });
 
-          setSessionRegistry(prev => new Set([...prev, item.fingerprint]));
-          setSessionItems(prev => [...prev, { ...item, listItemId: listItem.id, productId: product.id }]);
+          // Registra fingerprint → nome de exibição para próximas chamadas
+          registryRef.current.set(item.fingerprint, item.display_name || item.name);
+
+          setSessionItems(prev => [
+            ...prev,
+            { ...item, listItemId: listItem.id, productId: product.id },
+          ]);
           onItemFound?.({ item, listItem, product });
         }
       } catch (err) {
         console.error('Erro no scan:', err);
       } finally {
-        setStatus('scanning');
+        isProcessingRef.current = false;
+        updateStatus('scanning');
       }
     }, SCAN_INTERVAL_MS);
 
     return () => clearInterval(intervalRef.current);
-  }, [isActive, status, sessionRegistry, sceneAnchor, listId, roomId, roomName, householdId, onItemFound]);
+  // Deps intencionalmente estáveis: só isActive e funções/valores que não mudam no loop
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, listId, roomId, roomName, householdId]);
 
-  // Limpa ao desmontar
   useEffect(() => () => stopCamera(), [stopCamera]);
 
   const resetSession = useCallback(() => {
-    setSessionRegistry(new Set());
+    registryRef.current.clear();
+    sceneAnchorRef.current = null;
     setSessionItems([]);
-    setSceneAnchor(null);
   }, []);
 
   return {
@@ -129,7 +155,7 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
     isActive,
     status,
     sessionItems,
-    sessionRegistry,
+    sessionCount: sessionItems.length,
     startCamera,
     stopCamera,
     resetSession,

@@ -5,17 +5,29 @@ import pool from '../db/client.js';
 const router = Router();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-/**
- * Normaliza texto para gerar fingerprint do produto.
- * Ex: "Omo Pó 3kg" → "omo_po_3kg"
- */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidUUID(v) {
+  return typeof v === 'string' && UUID_RE.test(v);
+}
+
+// Remove caracteres que poderiam injetar instruções no prompt do Claude
+function sanitizeForPrompt(str, maxLen = 100) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/[<>\[\]{}\\`]/g, '')
+    .replace(/\n|\r/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
 function makeFingerprint(brand, name, sizeUnit) {
   const parts = [brand, name, sizeUnit]
     .filter(Boolean)
     .join(' ')
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')  // remove acentos
+    .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
   return parts;
@@ -23,27 +35,41 @@ function makeFingerprint(brand, name, sizeUnit) {
 
 /**
  * POST /api/scan/frame
- * Analisa um frame da câmera via Claude Vision.
- * Retorna lista de itens novos (não presentes no registry da sessão).
  */
 router.post('/frame', async (req, res) => {
   const { image_base64, room_name, already_seen, scene_anchor, household_id } = req.body;
 
-  if (!image_base64) {
+  if (!image_base64 || typeof image_base64 !== 'string') {
     return res.status(400).json({ error: 'Imagem obrigatória' });
   }
 
-  // Monta o prompt com contexto da sessão para evitar duplicatas
-  const alreadySeenText = already_seen?.length
-    ? `\nItens JÁ identificados nesta sessão (NÃO inclua na resposta):\n${already_seen.map(i => `- ${i}`).join('\n')}`
+  // Imagem base64 JPEG ~1MB ≈ 1.37M chars
+  if (image_base64.length > 2_000_000) {
+    return res.status(400).json({ error: 'Imagem muito grande (máx 1.5MB)' });
+  }
+
+  // Sanitiza entradas que vão para o prompt — evita prompt injection
+  const safeRoomName = sanitizeForPrompt(room_name, 50);
+  const safeAnchor = sanitizeForPrompt(scene_anchor, 150);
+
+  // already_seen deve ser array de strings curtas (nomes de exibição, não fingerprints)
+  const safeAlreadySeen = Array.isArray(already_seen)
+    ? already_seen
+        .filter(s => typeof s === 'string')
+        .map(s => sanitizeForPrompt(s, 80))
+        .slice(0, 50)  // máx 50 itens por sessão
+    : [];
+
+  const alreadySeenText = safeAlreadySeen.length
+    ? `\nItens JÁ identificados nesta sessão (NÃO inclua na resposta):\n${safeAlreadySeen.map(i => `- ${i}`).join('\n')}`
     : '';
 
-  const sceneContext = scene_anchor
-    ? `\nContexto do local: ${scene_anchor}`
+  const sceneContext = safeAnchor
+    ? `\nContexto do local: ${safeAnchor}`
     : '';
 
   const prompt = `Você está ajudando a montar uma lista de compras doméstica em português brasileiro.
-Cômodo atual: ${room_name || 'Não especificado'}${sceneContext}${alreadySeenText}
+Cômodo atual: ${safeRoomName || 'Não especificado'}${sceneContext}${alreadySeenText}
 
 Analise esta imagem e identifique produtos domésticos visíveis (alimentos, limpeza, higiene, ração para animais, etc.).
 
@@ -77,16 +103,9 @@ Retorne APENAS o JSON, sem texto adicional.`;
           content: [
             {
               type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/jpeg',
-                data: image_base64,
-              },
+              source: { type: 'base64', media_type: 'image/jpeg', data: image_base64 },
             },
-            {
-              type: 'text',
-              text: prompt,
-            },
+            { type: 'text', text: prompt },
           ],
         },
       ],
@@ -94,25 +113,31 @@ Retorne APENAS o JSON, sem texto adicional.`;
 
     let parsed;
     try {
-      const raw = response.content[0].text.trim();
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(response.content[0].text.trim());
     } catch {
-      // Claude às vezes inclui markdown mesmo pedindo JSON puro
       const jsonMatch = response.content[0].text.match(/\{[\s\S]*\}/);
       parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { items: [], scene_description: '' };
     }
 
-    // Adiciona fingerprint a cada item e filtra por confiança mínima
+    const VALID_CATEGORIES = new Set(['alimentação', 'limpeza', 'higiene', 'gatos', 'outros']);
+
     const items = (parsed.items || [])
-      .filter(item => (item.confidence || 0) >= 0.6)
+      .filter(item => item && typeof item.name === 'string' && (item.confidence || 0) >= 0.6)
       .map(item => ({
-        ...item,
+        name: String(item.name).slice(0, 200),
+        brand: item.brand ? String(item.brand).slice(0, 100) : null,
+        size_unit: item.size_unit ? String(item.size_unit).slice(0, 50) : null,
+        category: VALID_CATEGORIES.has(item.category) ? item.category : 'outros',
+        qty_visible: Math.min(Math.max(1, parseInt(item.qty_visible) || 1), 99),
+        confidence: item.confidence,
         fingerprint: makeFingerprint(item.brand, item.name, item.size_unit),
+        // Nome de exibição para incluir em already_seen nas próximas chamadas
+        display_name: [item.brand, item.name, item.size_unit].filter(Boolean).join(' ').slice(0, 80),
       }));
 
     res.json({
       items,
-      scene_description: parsed.scene_description || '',
+      scene_description: sanitizeForPrompt(parsed.scene_description, 150),
     });
   } catch (err) {
     console.error('Erro Claude Vision:', err);
@@ -122,25 +147,26 @@ Retorne APENAS o JSON, sem texto adicional.`;
 
 /**
  * POST /api/scan/barcode
- * Resolve um código de barras para produto.
- * Primeiro busca no catálogo local; fallback futuro: Open Food Facts.
  */
 router.post('/barcode', async (req, res) => {
   const { barcode, household_id } = req.body;
 
-  if (!barcode) return res.status(400).json({ error: 'Código obrigatório' });
+  if (!barcode || typeof barcode !== 'string') {
+    return res.status(400).json({ error: 'Código obrigatório' });
+  }
+  if (barcode.length > 50) {
+    return res.status(400).json({ error: 'Código inválido' });
+  }
 
   try {
     const { rows } = await pool.query(
       'SELECT * FROM products WHERE barcode = $1 AND (household_id = $2 OR household_id IS NULL)',
-      [barcode, household_id]
+      [barcode, household_id || null]
     );
 
     if (rows.length) {
       return res.json({ found: true, product: rows[0] });
     }
-
-    // Produto não encontrado no catálogo local
     res.json({ found: false, barcode });
   } catch (err) {
     console.error(err);
@@ -150,16 +176,43 @@ router.post('/barcode', async (req, res) => {
 
 /**
  * POST /api/scan/add-item
- * Adiciona um item identificado à lista, criando o produto se necessário.
  */
 router.post('/add-item', async (req, res) => {
   const { list_id, room_id, household_id, product_data, qty } = req.body;
-  const client = await pool.connect();
 
+  // Validação de campos obrigatórios e formatos
+  if (!isValidUUID(list_id)) {
+    return res.status(400).json({ error: 'list_id inválido' });
+  }
+  if (!isValidUUID(household_id)) {
+    return res.status(400).json({ error: 'household_id inválido' });
+  }
+  if (!product_data || typeof product_data.name !== 'string' || !product_data.name.trim()) {
+    return res.status(400).json({ error: 'Nome do produto obrigatório' });
+  }
+
+  const safeQty = Math.min(Math.max(1, parseInt(qty) || 1), 99);
+
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Upsert do produto no catálogo
+    // IDOR: confirma que list_id pertence ao household_id
+    const { rows: listCheck } = await client.query(
+      'SELECT id FROM shopping_lists WHERE id = $1 AND household_id = $2 AND status = $3',
+      [list_id, household_id, 'open']
+    );
+    if (!listCheck.length) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Lista não encontrada ou não autorizada' });
+    }
+
+    // Valida room_id se fornecido
+    if (room_id !== undefined && room_id !== null && !isValidUUID(room_id)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'room_id inválido' });
+    }
+
     const fp = product_data.fingerprint || makeFingerprint(
       product_data.brand, product_data.name, product_data.size_unit
     );
@@ -178,10 +231,10 @@ router.post('/add-item', async (req, res) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
         [
           household_id,
-          product_data.name,
-          product_data.brand || null,
-          product_data.barcode || null,
-          product_data.size_unit || null,
+          product_data.name.trim().slice(0, 200),
+          product_data.brand ? String(product_data.brand).slice(0, 100) : null,
+          product_data.barcode ? String(product_data.barcode).slice(0, 50) : null,
+          product_data.size_unit ? String(product_data.size_unit).slice(0, 50) : null,
           product_data.category || 'outros',
           fp,
         ]
@@ -189,7 +242,6 @@ router.post('/add-item', async (req, res) => {
       product = rows[0];
     }
 
-    // Verifica se item já está na lista
     const { rows: existingItem } = await client.query(
       'SELECT * FROM list_items WHERE list_id = $1 AND product_id = $2',
       [list_id, product.id]
@@ -197,17 +249,16 @@ router.post('/add-item', async (req, res) => {
 
     let item;
     if (existingItem.length) {
-      // Incrementa quantidade se item já existe
       const { rows } = await client.query(
         'UPDATE list_items SET qty_needed = qty_needed + $1 WHERE id = $2 RETURNING *',
-        [qty || 1, existingItem[0].id]
+        [safeQty, existingItem[0].id]
       );
       item = rows[0];
     } else {
       const { rows } = await client.query(
         `INSERT INTO list_items (list_id, product_id, room_id, qty_needed)
          VALUES ($1, $2, $3, $4) RETURNING *`,
-        [list_id, product.id, room_id || null, qty || 1]
+        [list_id, product.id, room_id || null, safeQty]
       );
       item = rows[0];
     }
