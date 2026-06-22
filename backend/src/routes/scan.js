@@ -3,7 +3,18 @@ import OpenAI from 'openai';
 import pool from '../db/client.js';
 
 const router = Router();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Lazy: instancia somente na primeira chamada para não crashar na subida sem API key
+let _openai = null;
+function getOpenAI() {
+  if (!_openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error('OPENAI_API_KEY não configurada');
+    }
+    _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return _openai;
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -94,7 +105,7 @@ Se não houver itens novos, retorne: { "items": [], "scene_description": "..." }
 Retorne APENAS o JSON, sem texto adicional.`;
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAI().chat.completions.create({
       model: 'gpt-4.1-nano',
       max_tokens: 1024,
       messages: [
