@@ -8,7 +8,8 @@ const { Pool } = pg;
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sql = readFileSync(join(__dirname, '../src/db/migrate_auth.sql'), 'utf8');
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// DATABASE_PUBLIC_URL para rodar localmente (o internal só funciona dentro do Railway)
+const pool = new Pool({ connectionString: process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL });
 
 try {
   await pool.query(sql);
