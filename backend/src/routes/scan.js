@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import pool from '../db/client.js';
 
 const router = Router();
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -94,16 +94,19 @@ Se não houver itens novos, retorne: { "items": [], "scene_description": "..." }
 Retorne APENAS o JSON, sem texto adicional.`;
 
   try {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
       max_tokens: 1024,
       messages: [
         {
           role: 'user',
           content: [
             {
-              type: 'image',
-              source: { type: 'base64', media_type: 'image/jpeg', data: image_base64 },
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${image_base64}`,
+                detail: 'low',  // menor custo; suficiente para identificar produtos
+              },
             },
             { type: 'text', text: prompt },
           ],
@@ -112,10 +115,11 @@ Retorne APENAS o JSON, sem texto adicional.`;
     });
 
     let parsed;
+    const raw = response.choices[0].message.content?.trim() ?? '';
     try {
-      parsed = JSON.parse(response.content[0].text.trim());
+      parsed = JSON.parse(raw);
     } catch {
-      const jsonMatch = response.content[0].text.match(/\{[\s\S]*\}/);
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
       parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { items: [], scene_description: '' };
     }
 
