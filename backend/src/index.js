@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { rateLimit } from 'express-rate-limit';
 
+import authRouter from './routes/auth.js';
 import householdsRouter from './routes/households.js';
 import listsRouter from './routes/lists.js';
 import scanRouter from './routes/scan.js';
@@ -45,6 +46,10 @@ app.use(express.json({ limit: '10mb' }));
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', app: 'Listinha API' }));
 
+// Auth (público — não precisa de token)
+app.use('/api/auth', authRouter);
+
+// Rotas protegidas por JWT (middleware aplicado dentro de cada router)
 app.use('/api/households', householdsRouter);
 app.use('/api/lists', listsRouter);
 app.use('/api/scan/frame', scanLimiter);

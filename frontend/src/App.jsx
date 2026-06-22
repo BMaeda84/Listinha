@@ -1,27 +1,32 @@
 import { useState } from 'react';
+import { useAuth } from './hooks/useAuth';
+import Auth from './pages/Auth';
 import Home from './pages/Home';
 import ListDetail from './pages/ListDetail';
 
 export default function App() {
+  const auth = useAuth();
   const [page, setPage] = useState({ name: 'home' });
 
-  function openList(listId, household) {
-    setPage({ name: 'list', listId, household });
-  }
-
-  function goHome() {
-    setPage({ name: 'home' });
+  if (!auth.isLoggedIn) {
+    return <Auth onAuth={(token, user, household) => auth.save(token, user, household)} />;
   }
 
   if (page.name === 'list') {
     return (
       <ListDetail
         listId={page.listId}
-        household={page.household}
-        onBack={goHome}
+        household={auth.household}
+        auth={auth}
+        onBack={() => setPage({ name: 'home' })}
       />
     );
   }
 
-  return <Home onOpenList={openList} />;
+  return (
+    <Home
+      auth={auth}
+      onOpenList={(listId) => setPage({ name: 'list', listId })}
+    />
+  );
 }

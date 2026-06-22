@@ -1,68 +1,34 @@
 import { Router } from 'express';
 import pool from '../db/client.js';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
+router.use(requireAuth);
 
-const DEFAULT_ROOMS = [
-  { name: 'Cozinha', icon: '🍳', sort_order: 0 },
-  { name: 'Banheiro', icon: '🚿', sort_order: 1 },
-  { name: 'Quarto', icon: '🛏️', sort_order: 2 },
-  { name: 'Lavanderia', icon: '🧺', sort_order: 3 },
-  { name: 'Área Externa', icon: '🌿', sort_order: 4 },
-  { name: 'Gatos', icon: '🐱', sort_order: 5 },
-];
-
-// Cria um novo domicílio com cômodos padrão
-router.post('/', async (req, res) => {
-  const { name } = req.body;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const { rows } = await client.query(
-      'INSERT INTO households (name) VALUES ($1) RETURNING *',
-      [name || 'Minha Casa']
-    );
-    const household = rows[0];
-
-    for (const room of DEFAULT_ROOMS) {
-      await client.query(
-        'INSERT INTO rooms (household_id, name, icon, sort_order) VALUES ($1, $2, $3, $4)',
-        [household.id, room.name, room.icon, room.sort_order]
-      );
-    }
-
-    await client.query('COMMIT');
-    res.status(201).json(household);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao criar domicílio' });
-  } finally {
-    client.release();
-  }
-});
-
-// Busca domicílio por ID (com cômodos)
-router.get('/:id', async (req, res) => {
-  if (!UUID_RE.test(req.params.id)) {
-    return res.status(400).json({ error: 'ID inválido' });
-  }
+// Retorna o household do usuário logado (com cômodos e membros)
+router.get('/me', async (req, res) => {
   try {
     const { rows: hh } = await pool.query(
       'SELECT * FROM households WHERE id = $1',
-      [req.params.id]
+      [req.user.householdId]
     );
     if (!hh.length) return res.status(404).json({ error: 'Não encontrado' });
 
     const { rows: rooms } = await pool.query(
       'SELECT * FROM rooms WHERE household_id = $1 ORDER BY sort_order',
-      [req.params.id]
+      [req.user.householdId]
     );
 
-    res.json({ ...hh[0], rooms });
+    const { rows: members } = await pool.query(
+      `SELECT u.id, u.name, u.email, hm.role, hm.joined_at
+       FROM household_members hm
+       JOIN users u ON u.id = hm.user_id
+       WHERE hm.household_id = $1
+       ORDER BY hm.joined_at`,
+      [req.user.householdId]
+    );
+
+    res.json({ ...hh[0], rooms, members });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro interno' });

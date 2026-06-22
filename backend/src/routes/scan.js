@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import OpenAI from 'openai';
 import pool from '../db/client.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
+router.use(requireAuth);
 
 // Lazy: instancia somente na primeira chamada para não crashar na subida sem API key
 let _openai = null;
@@ -48,7 +50,8 @@ function makeFingerprint(brand, name, sizeUnit) {
  * POST /api/scan/frame
  */
 router.post('/frame', async (req, res) => {
-  const { image_base64, room_name, already_seen, scene_anchor, household_id } = req.body;
+  const { image_base64, room_name, already_seen, scene_anchor } = req.body;
+  const household_id = req.user.householdId;
 
   if (!image_base64 || typeof image_base64 !== 'string') {
     return res.status(400).json({ error: 'Imagem obrigatória' });
@@ -164,7 +167,8 @@ Retorne APENAS o JSON, sem texto adicional.`;
  * POST /api/scan/barcode
  */
 router.post('/barcode', async (req, res) => {
-  const { barcode, household_id } = req.body;
+  const { barcode } = req.body;
+  const household_id = req.user.householdId;
 
   if (!barcode || typeof barcode !== 'string') {
     return res.status(400).json({ error: 'Código obrigatório' });
@@ -193,7 +197,8 @@ router.post('/barcode', async (req, res) => {
  * POST /api/scan/add-item
  */
 router.post('/add-item', async (req, res) => {
-  const { list_id, room_id, household_id, product_data, qty } = req.body;
+  const { list_id, room_id, product_data, qty } = req.body;
+  const household_id = req.user.householdId;
 
   // Validação de campos obrigatórios e formatos
   if (!isValidUUID(list_id)) {
@@ -271,9 +276,9 @@ router.post('/add-item', async (req, res) => {
       item = rows[0];
     } else {
       const { rows } = await client.query(
-        `INSERT INTO list_items (list_id, product_id, room_id, qty_needed)
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [list_id, product.id, room_id || null, safeQty]
+        `INSERT INTO list_items (list_id, product_id, room_id, qty_needed, added_by)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [list_id, product.id, room_id || null, safeQty, req.user.userId]
       );
       item = rows[0];
     }

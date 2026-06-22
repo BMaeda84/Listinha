@@ -1,8 +1,12 @@
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const BASE = import.meta.env.VITE_API_URL || '/api';
 
-async function request(path, options = {}) {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+async function request(path, token, options = {}) {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
     ...options,
   });
   if (!res.ok) {
@@ -12,38 +16,26 @@ async function request(path, options = {}) {
   return res.json();
 }
 
-// Households
-export const createHousehold = (name) =>
-  request('/api/households', { method: 'POST', body: JSON.stringify({ name }) });
+// Retorna um objeto com todas as funções de API vinculadas ao token do usuário
+export function createApi(token) {
+  const r = (path, opts) => request(path, token, opts);
+  const post = (path, body) => r(path, { method: 'POST', body: JSON.stringify(body) });
+  const patch = (path, body) => r(path, { method: 'PATCH', body: JSON.stringify(body) });
 
-export const getHousehold = (id) =>
-  request(`/api/households/${id}`);
+  return {
+    // Household do usuário logado (rooms + members)
+    getHousehold: () => r('/households/me'),
 
-// Listas
-export const createList = (household_id, name) =>
-  request('/api/lists', { method: 'POST', body: JSON.stringify({ household_id, name }) });
+    // Listas
+    createList:  (name) => post('/lists', { name }),
+    getLists:    () => r('/lists'),
+    getList:     (id) => r(`/lists/${id}`),
+    checkItem:   (itemId, checked) => patch(`/lists/items/${itemId}/check`, { checked }),
+    completeList: (listId) => patch(`/lists/${listId}/complete`, {}),
 
-export const getLists = (householdId) =>
-  request(`/api/lists/household/${householdId}`);
-
-export const getList = (id) =>
-  request(`/api/lists/${id}`);
-
-export const checkItem = (itemId, checked) =>
-  request(`/api/lists/items/${itemId}/check`, {
-    method: 'PATCH',
-    body: JSON.stringify({ checked }),
-  });
-
-export const completeList = (listId) =>
-  request(`/api/lists/${listId}/complete`, { method: 'PATCH' });
-
-// Scan
-export const scanFrame = (payload) =>
-  request('/api/scan/frame', { method: 'POST', body: JSON.stringify(payload) });
-
-export const scanBarcode = (barcode, household_id) =>
-  request('/api/scan/barcode', { method: 'POST', body: JSON.stringify({ barcode, household_id }) });
-
-export const addScannedItem = (payload) =>
-  request('/api/scan/add-item', { method: 'POST', body: JSON.stringify(payload) });
+    // Scan
+    scanFrame:      (payload) => post('/scan/frame', payload),
+    scanBarcode:    (barcode) => post('/scan/barcode', { barcode }),
+    addScannedItem: (payload) => post('/scan/add-item', payload),
+  };
+}

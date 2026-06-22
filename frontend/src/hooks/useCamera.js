@@ -1,28 +1,24 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { detectMotion, isSharp, captureFrame } from '../utils/motionDetect';
-import { scanFrame, addScannedItem } from '../services/api';
 
 const SCAN_INTERVAL_MS = 2500;
 const STABILIZE_MS = 800;
 
-export function useCamera({ listId, roomId, roomName, householdId, onItemFound }) {
+export function useCamera({ listId, roomId, roomName, api, onItemFound }) {
   const videoRef = useRef(null);
   const prevCanvasRef = useRef(null);
   const intervalRef = useRef(null);
   const stabilizeTimerRef = useRef(null);
 
-  // Refs para valores lidos dentro do setInterval (evita loop de deps)
-  const statusRef = useRef('idle');       // 'idle'|'scanning'|'moving'|'blurred'|'processing'
+  const statusRef = useRef('idle');
   const isProcessingRef = useRef(false);
 
-  // Map<fingerprint, displayName> — não é state porque mutações internas
-  // não precisam re-renderizar; só sessionItems (para o contador de UI) precisa.
+  // Map<fingerprint, displayName> — não é state para não causar re-renders no loop
   const registryRef = useRef(new Map());
-
   const sceneAnchorRef = useRef(null);
 
-  const [isActive, setIsActive] = useState(false);
-  const [status, setStatus] = useState('idle');
+  const [isActive,     setIsActive]     = useState(false);
+  const [status,       setStatus]       = useState('idle');
   const [sessionItems, setSessionItems] = useState([]);
 
   function updateStatus(s) {
@@ -57,14 +53,12 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
     }
   }, []);
 
-  // Loop principal — roda uma única vez por sessão ativa
+  // Loop principal
   useEffect(() => {
     if (!isActive) return;
 
     intervalRef.current = setInterval(async () => {
       if (!videoRef.current || videoRef.current.readyState < 2) return;
-
-      // Usa ref para checar status sem colocá-lo nas deps
       if (isProcessingRef.current || statusRef.current === 'moving') return;
 
       const { canvas, base64 } = captureFrame(videoRef.current);
@@ -88,20 +82,18 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
         return;
       }
 
-      // 3. Enviar para Claude Vision
+      // 3. Enviar para Vision
       isProcessingRef.current = true;
       updateStatus('processing');
 
       try {
-        // already_seen envia nomes de exibição legíveis, não fingerprints
         const alreadySeen = Array.from(registryRef.current.values());
 
-        const result = await scanFrame({
+        const result = await api.scanFrame({
           image_base64: base64,
           room_name: roomName,
           already_seen: alreadySeen,
           scene_anchor: sceneAnchorRef.current,
-          household_id: householdId,
         });
 
         if (!sceneAnchorRef.current && result.scene_description) {
@@ -109,18 +101,15 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
         }
 
         for (const item of result.items || []) {
-          // Dedup por fingerprint usando o Map
           if (registryRef.current.has(item.fingerprint)) continue;
 
-          const { item: listItem, product } = await addScannedItem({
+          const { item: listItem, product } = await api.addScannedItem({
             list_id: listId,
             room_id: roomId,
-            household_id: householdId,
             product_data: item,
             qty: item.qty_visible || 1,
           });
 
-          // Registra fingerprint → nome de exibição para próximas chamadas
           registryRef.current.set(item.fingerprint, item.display_name || item.name);
 
           setSessionItems(prev => [
@@ -138,9 +127,8 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
     }, SCAN_INTERVAL_MS);
 
     return () => clearInterval(intervalRef.current);
-  // Deps intencionalmente estáveis: só isActive e funções/valores que não mudam no loop
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, listId, roomId, roomName, householdId]);
+  }, [isActive, listId, roomId, roomName]);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
@@ -150,14 +138,5 @@ export function useCamera({ listId, roomId, roomName, householdId, onItemFound }
     setSessionItems([]);
   }, []);
 
-  return {
-    videoRef,
-    isActive,
-    status,
-    sessionItems,
-    sessionCount: sessionItems.length,
-    startCamera,
-    stopCamera,
-    resetSession,
-  };
+  return { videoRef, isActive, status, sessionItems, sessionCount: sessionItems.length, startCamera, stopCamera, resetSession };
 }
