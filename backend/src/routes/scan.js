@@ -95,7 +95,7 @@ Retorne APENAS o JSON, sem texto adicional.`;
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4.1-nano',
       max_tokens: 1024,
       messages: [
         {
